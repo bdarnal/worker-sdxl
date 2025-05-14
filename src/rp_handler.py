@@ -5,6 +5,7 @@ import base64
 import shutil
 import concurrent.futures
 import logging
+import json
 import uuid
 import torch
 from diffusers import StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline, AutoencoderKL
@@ -20,6 +21,7 @@ import runpod
 from runpod.serverless.utils.rp_validator import validate
 from rp_schemas import INPUT_SCHEMA
 from google.cloud import storage
+from google.oauth2 import service_account
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sdxl_worker")
@@ -67,7 +69,11 @@ MODELS = ModelHandler()
 # ---------------------------------- Upload ---------------------------------- #
 def upload_to_gcs(local_path, bucket_name, destination_blob):
     try:
-        client = storage.Client()
+        credentials_json = os.getenv("GCS_CREDENTIALS_JSON")
+        credentials_dict = json.loads(credentials_json)
+        credentials = service_account.Credentials.from_service_account_info(credentials_dict)
+
+        client = storage.Client(credentials=credentials)
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(destination_blob)
         blob.upload_from_filename(local_path)
