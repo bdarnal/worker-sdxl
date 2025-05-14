@@ -1,4 +1,4 @@
-'''Worker handler to generate SDXL images and upload them to GCS or return base64 fallback.'''
+'''Worker handler to generate SDXL images and upload them to GCS or return base64 fallback 2.'''
 
 import os
 import base64
