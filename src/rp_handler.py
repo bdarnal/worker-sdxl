@@ -1,9 +1,11 @@
-'''Worker handler to generate SDXL images and upload them via URL or return base64 fallback.'''
+'''Worker handler to generate SDXL images and upload them to GCS or return base64 fallback.'''
 
 import os
 import base64
 import shutil
 import concurrent.futures
+import logging
+import uuid
 import torch
 from diffusers import StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline, AutoencoderKL
 from diffusers.utils import load_image
@@ -15,9 +17,12 @@ from diffusers import (
     DPMSolverMultistepScheduler,
 )
 import runpod
-from runpod.serverless.utils import rp_upload, rp_cleanup
 from runpod.serverless.utils.rp_validator import validate
 from rp_schemas import INPUT_SCHEMA
+from google.cloud import storage
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("sdxl_worker")
 
 torch.cuda.empty_cache()
 
@@ -59,37 +64,54 @@ class ModelHandler:
 
 MODELS = ModelHandler()
 
+# ---------------------------------- Upload ---------------------------------- #
+def upload_to_gcs(local_path, bucket_name, destination_blob):
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(destination_blob)
+        blob.upload_from_filename(local_path)
+        url = blob.generate_signed_url(version="v4", expiration=3600, method="GET")
+        logger.info(f"✅ Uploaded to GCS: {url}")
+        return url
+    except Exception as e:
+        logger.warning(f"⚠️ GCS upload failed: {e}. Falling back to base64.")
+        with open(local_path, "rb") as image_file:
+            image_data = base64.b64encode(image_file.read()).decode("utf-8")
+            return f"data:image/png;base64,{image_data}"
+
 # ---------------------------------- Helper ---------------------------------- #
 def _save_and_upload_images(images, job_id):
     output_dir = f"/workspace/output/{job_id}"
     os.makedirs(output_dir, exist_ok=True)
     image_urls = []
 
+    bucket_name = os.getenv("GCS_BUCKET_NAME")
+
     for index, image in enumerate(images):
         filename = f"{index}.png"
         image_path = os.path.join(output_dir, filename)
         image.save(image_path)
 
-        base_url = os.getenv("RUNPOD_PUBLIC_URL")
-        if base_url:
-            image_url = f"{base_url}/output/{job_id}/{filename}"
-            image_urls.append(image_url)
+        if bucket_name:
+            blob_path = f"output/{job_id}/{filename}"
+            image_url = upload_to_gcs(image_path, bucket_name, blob_path)
         else:
             with open(image_path, "rb") as image_file:
                 image_data = base64.b64encode(image_file.read()).decode("utf-8")
-                image_urls.append(f"data:image/png;base64,{image_data}")
+                image_url = f"data:image/png;base64,{image_data}"
 
-    for url in image_urls:
-        print(f"🖼️ Image available at: {url}")
+        image_urls.append(image_url)
 
+    logger.info(f"🧹 Cleaning up: {output_dir}")
     try:
         shutil.rmtree(output_dir)
-        print(f"🧹 Cleaned up directory: {output_dir}")
     except Exception as e:
-        print(f"⚠️ Failed to remove output directory {output_dir}: {e}")
+        logger.warning(f"⚠️ Cleanup failed: {e}")
 
     return image_urls
 
+# ---------------------------- Scheduler Builder ---------------------------- #
 def make_scheduler(name, config):
     return {
         "PNDM": PNDMScheduler.from_config(config),
@@ -99,6 +121,7 @@ def make_scheduler(name, config):
         "DPMSolverMultistep": DPMSolverMultistepScheduler.from_config(config),
     }[name]
 
+# ----------------------------- Main Entry Point ---------------------------- #
 @torch.inference_mode()
 def generate_image(job):
     job_input = job["input"]
