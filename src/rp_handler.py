@@ -1,15 +1,12 @@
-'''
-Contains the handler function that will be called by the serverless.
-'''
+'''Worker handler to generate SDXL images and upload them via URL or return base64 fallback.'''
 
 import os
 import base64
+import shutil
 import concurrent.futures
-
 import torch
 from diffusers import StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline, AutoencoderKL
 from diffusers.utils import load_image
-
 from diffusers import (
     PNDMScheduler,
     LMSDiscreteScheduler,
@@ -17,18 +14,14 @@ from diffusers import (
     EulerDiscreteScheduler,
     DPMSolverMultistepScheduler,
 )
-
 import runpod
 from runpod.serverless.utils import rp_upload, rp_cleanup
 from runpod.serverless.utils.rp_validator import validate
-
 from rp_schemas import INPUT_SCHEMA
 
 torch.cuda.empty_cache()
 
 # ------------------------------- Model Handler ------------------------------ #
-
-
 class ModelHandler:
     def __init__(self):
         self.base = None
@@ -61,35 +54,41 @@ class ModelHandler:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future_base = executor.submit(self.load_base)
             future_refiner = executor.submit(self.load_refiner)
-
             self.base = future_base.result()
             self.refiner = future_refiner.result()
-
 
 MODELS = ModelHandler()
 
 # ---------------------------------- Helper ---------------------------------- #
-
-
 def _save_and_upload_images(images, job_id):
-    os.makedirs(f"/{job_id}", exist_ok=True)
+    output_dir = f"/workspace/output/{job_id}"
+    os.makedirs(output_dir, exist_ok=True)
     image_urls = []
+
     for index, image in enumerate(images):
-        image_path = os.path.join(f"/{job_id}", f"{index}.png")
+        filename = f"{index}.png"
+        image_path = os.path.join(output_dir, filename)
         image.save(image_path)
 
-        if os.environ.get('BUCKET_ENDPOINT_URL', False):
-            image_url = rp_upload.upload_image(job_id, image_path)
+        base_url = os.getenv("RUNPOD_PUBLIC_URL")
+        if base_url:
+            image_url = f"{base_url}/output/{job_id}/{filename}"
             image_urls.append(image_url)
         else:
             with open(image_path, "rb") as image_file:
-                image_data = base64.b64encode(
-                    image_file.read()).decode("utf-8")
+                image_data = base64.b64encode(image_file.read()).decode("utf-8")
                 image_urls.append(f"data:image/png;base64,{image_data}")
 
-    rp_cleanup.clean([f"/{job_id}"])
-    return image_urls
+    for url in image_urls:
+        print(f"🖼️ Image available at: {url}")
 
+    try:
+        shutil.rmtree(output_dir)
+        print(f"🧹 Cleaned up directory: {output_dir}")
+    except Exception as e:
+        print(f"⚠️ Failed to remove output directory {output_dir}: {e}")
+
+    return image_urls
 
 def make_scheduler(name, config):
     return {
@@ -100,32 +99,24 @@ def make_scheduler(name, config):
         "DPMSolverMultistep": DPMSolverMultistepScheduler.from_config(config),
     }[name]
 
-
 @torch.inference_mode()
 def generate_image(job):
-    '''
-    Generate an image from text using your Model
-    '''
     job_input = job["input"]
-
-    # Input validation
     validated_input = validate(job_input, INPUT_SCHEMA)
-
     if 'errors' in validated_input:
         return {"error": validated_input['errors']}
     job_input = validated_input['validated_input']
 
     starting_image = job_input['image_url']
+    job_id = job['id']
 
     if job_input['seed'] is None:
         job_input['seed'] = int.from_bytes(os.urandom(2), "big")
 
     generator = torch.Generator("cuda").manual_seed(job_input['seed'])
+    MODELS.base.scheduler = make_scheduler(job_input['scheduler'], MODELS.base.scheduler.config)
 
-    MODELS.base.scheduler = make_scheduler(
-        job_input['scheduler'], MODELS.base.scheduler.config)
-
-    if starting_image:  # If image_url is provided, run only the refiner pipeline
+    if starting_image:
         init_image = load_image(starting_image).convert("RGB")
         output = MODELS.refiner(
             prompt=job_input['prompt'],
@@ -135,7 +126,6 @@ def generate_image(job):
             generator=generator
         ).images
     else:
-        # Generate latent image using pipe
         image = MODELS.base(
             prompt=job_input['prompt'],
             negative_prompt=job_input['negative_prompt'],
@@ -160,22 +150,17 @@ def generate_image(job):
             ).images
         except RuntimeError as err:
             return {
-                "error": f"RuntimeError: {err}, Stack Trace: {err.__traceback__}",
+                "error": f"RuntimeError: {err}",
                 "refresh_worker": True
             }
 
-    image_urls = _save_and_upload_images(output, job['id'])
+    image_urls = _save_and_upload_images(output, job_id)
 
-    results = {
+    return {
         "images": image_urls,
         "image_url": image_urls[0],
-        "seed": job_input['seed']
+        "seed": job_input['seed'],
+        "refresh_worker": starting_image is not None
     }
-
-    if starting_image:
-        results['refresh_worker'] = True
-
-    return results
-
 
 runpod.serverless.start({"handler": generate_image})
