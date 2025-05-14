@@ -1,6 +1,6 @@
 runpod~=1.7.0
 hf_transfer
-
+google-cloud-storage
 diffusers==0.21.4
 transformers==4.34.0
 accelerate==0.23.0
