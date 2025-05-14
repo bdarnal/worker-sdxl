@@ -1,4 +1,4 @@
-'''Worker handler to generate SDXL images and upload them to GCS or return base64 fallback 2.'''
+'''Worker handler to generate SDXL images and upload them to GCS or return base64 fallback.'''
 
 import os
 import base64
@@ -67,9 +67,23 @@ class ModelHandler:
 MODELS = ModelHandler()
 
 # ---------------------------------- Upload ---------------------------------- #
-def upload_to_gcs(local_path, bucket_name, destination_blob):
+def encode_base64_fallback(path):
     try:
-        credentials_json = os.getenv("GCS_CREDENTIALS_JSON")
+        with open(path, "rb") as image_file:
+            image_data = base64.b64encode(image_file.read()).decode("utf-8")
+            return f"data:image/png;base64,{image_data}"
+    except Exception as e:
+        logger.error(f"❌ Failed to base64-encode image: {e}")
+        return None
+
+def upload_to_gcs(local_path, bucket_name, destination_blob):
+    credentials_json = os.getenv("GCS_CREDENTIALS_JSON")
+
+    if not credentials_json:
+        logger.warning("⚠️ GCS_CREDENTIALS_JSON is missing.")
+        return encode_base64_fallback(local_path)
+
+    try:
         credentials_dict = json.loads(credentials_json)
         credentials = service_account.Credentials.from_service_account_info(credentials_dict)
 
@@ -77,14 +91,17 @@ def upload_to_gcs(local_path, bucket_name, destination_blob):
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(destination_blob)
         blob.upload_from_filename(local_path)
-        url = blob.generate_signed_url(version="v4", expiration=3600, method="GET")
+
+        url = blob.generate_signed_url(
+            version="v4",
+            expiration=3600,
+            method="GET"
+        )
         logger.info(f"✅ Uploaded to GCS: {url}")
         return url
     except Exception as e:
-        logger.warning(f"⚠️ GCS upload failed: {e}. Falling back to base64.")
-        with open(local_path, "rb") as image_file:
-            image_data = base64.b64encode(image_file.read()).decode("utf-8")
-            return f"data:image/png;base64,{image_data}"
+        logger.warning(f"⚠️ GCS upload failed: {e}. Using base64 fallback.")
+        return encode_base64_fallback(local_path)
 
 # ---------------------------------- Helper ---------------------------------- #
 def _save_and_upload_images(images, job_id):
@@ -103,9 +120,7 @@ def _save_and_upload_images(images, job_id):
             blob_path = f"output/{job_id}/{filename}"
             image_url = upload_to_gcs(image_path, bucket_name, blob_path)
         else:
-            with open(image_path, "rb") as image_file:
-                image_data = base64.b64encode(image_file.read()).decode("utf-8")
-                image_url = f"data:image/png;base64,{image_data}"
+            image_url = encode_base64_fallback(image_path)
 
         image_urls.append(image_url)
 
