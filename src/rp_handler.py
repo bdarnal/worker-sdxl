@@ -160,43 +160,45 @@ def generate_image(job):
     generator = torch.Generator("cuda").manual_seed(job_input['seed'])
     MODELS.base.scheduler = make_scheduler(job_input['scheduler'], MODELS.base.scheduler.config)
 
-    if starting_image:
-        init_image = load_image(starting_image).convert("RGB")
-        output = MODELS.refiner(
-            prompt=job_input['prompt'],
-            num_inference_steps=job_input['refiner_inference_steps'],
-            strength=job_input['strength'],
-            image=init_image,
-            generator=generator
-        ).images
-    else:
-        image = MODELS.base(
-            prompt=job_input['prompt'],
-            negative_prompt=job_input['negative_prompt'],
-            height=job_input['height'],
-            width=job_input['width'],
-            num_inference_steps=job_input['num_inference_steps'],
-            guidance_scale=job_input['guidance_scale'],
-            denoising_end=job_input['high_noise_frac'],
-            output_type="latent",
-            num_images_per_prompt=job_input['num_images'],
-            generator=generator
-        ).images
-
-        try:
+    try:
+        if starting_image:
+            init_image = load_image(starting_image).convert("RGB")
             output = MODELS.refiner(
                 prompt=job_input['prompt'],
                 num_inference_steps=job_input['refiner_inference_steps'],
                 strength=job_input['strength'],
-                image=image,
+                image=init_image,
+                generator=generator
+            ).images
+        else:
+            base_result = MODELS.base.__call__(
+                prompt=job_input['prompt'],
+                negative_prompt=job_input['negative_prompt'],
+                height=job_input['height'],
+                width=job_input['width'],
+                num_inference_steps=job_input['num_inference_steps'],
+                guidance_scale=job_input['guidance_scale'],
+                denoising_end=job_input['high_noise_frac'],
+                output_type="latent",
+                num_images_per_prompt=job_input['num_images'],
+                generator=generator
+            )
+            image_latents = base_result.latents
+
+            output = MODELS.refiner(
+                prompt=job_input['prompt'],
+                num_inference_steps=job_input['refiner_inference_steps'],
+                strength=job_input['strength'],
+                image=image_latents,
                 num_images_per_prompt=job_input['num_images'],
                 generator=generator
             ).images
-        except RuntimeError as err:
-            return {
-                "error": f"RuntimeError: {err}",
-                "refresh_worker": True
-            }
+
+    except RuntimeError as err:
+        return {
+            "error": f"RuntimeError: {err}",
+            "refresh_worker": True
+        }
 
     image_urls = _save_and_upload_images(output, job_id)
 
