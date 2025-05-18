@@ -73,14 +73,14 @@ def encode_base64_fallback(path):
             image_data = base64.b64encode(image_file.read()).decode("utf-8")
             return f"data:image/png;base64,{image_data}"
     except Exception as e:
-        logger.error(f"❌ Failed to base64-encode image: {e}")
+        logger.error(f"\u274c Failed to base64-encode image: {e}")
         return None
 
 def upload_to_gcs(local_path, bucket_name, destination_blob):
     credentials_json = os.getenv("GCS_CREDENTIALS_JSON")
 
     if not credentials_json:
-        logger.warning("⚠️ GCS_CREDENTIALS_JSON is missing.")
+        logger.warning("\u26a0\ufe0f GCS_CREDENTIALS_JSON is missing.")
         return encode_base64_fallback(local_path)
 
     try:
@@ -97,10 +97,10 @@ def upload_to_gcs(local_path, bucket_name, destination_blob):
             expiration=3600,
             method="GET"
         )
-        logger.info(f"✅ Uploaded to GCS: {url}")
+        logger.info(f"\u2705 Uploaded to GCS: {url}")
         return url
     except Exception as e:
-        logger.warning(f"⚠️ GCS upload failed: {e}. Using base64 fallback.")
+        logger.warning(f"\u26a0\ufe0f GCS upload failed: {e}. Using base64 fallback.")
         return encode_base64_fallback(local_path)
 
 # ---------------------------------- Helper ---------------------------------- #
@@ -124,11 +124,11 @@ def _save_and_upload_images(images, job_id):
 
         image_urls.append(image_url)
 
-    logger.info(f"🧹 Cleaning up: {output_dir}")
+    logger.info(f"\U0001f9f9 Cleaning up: {output_dir}")
     try:
         shutil.rmtree(output_dir)
     except Exception as e:
-        logger.warning(f"⚠️ Cleanup failed: {e}")
+        logger.warning(f"\u26a0\ufe0f Cleanup failed: {e}")
 
     return image_urls
 
@@ -171,7 +171,7 @@ def generate_image(job):
                 generator=generator
             ).images
         else:
-            base_result = MODELS.base.__call__(
+            image = MODELS.base(
                 prompt=job_input['prompt'],
                 negative_prompt=job_input['negative_prompt'],
                 height=job_input['height'],
@@ -179,34 +179,32 @@ def generate_image(job):
                 num_inference_steps=job_input['num_inference_steps'],
                 guidance_scale=job_input['guidance_scale'],
                 denoising_end=job_input['high_noise_frac'],
-                output_type="latent",
                 num_images_per_prompt=job_input['num_images'],
                 generator=generator
-            )
-            image_latents = base_result.latents
+            ).images
 
             output = MODELS.refiner(
                 prompt=job_input['prompt'],
                 num_inference_steps=job_input['refiner_inference_steps'],
                 strength=job_input['strength'],
-                image=image_latents,
+                image=image,
                 num_images_per_prompt=job_input['num_images'],
                 generator=generator
             ).images
+
+        image_urls = _save_and_upload_images(output, job_id)
+
+        return {
+            "images": image_urls,
+            "image_url": image_urls[0],
+            "seed": job_input['seed'],
+            "refresh_worker": starting_image is not None
+        }
 
     except RuntimeError as err:
         return {
             "error": f"RuntimeError: {err}",
             "refresh_worker": True
         }
-
-    image_urls = _save_and_upload_images(output, job_id)
-
-    return {
-        "images": image_urls,
-        "image_url": image_urls[0],
-        "seed": job_input['seed'],
-        "refresh_worker": starting_image is not None
-    }
 
 runpod.serverless.start({"handler": generate_image})
